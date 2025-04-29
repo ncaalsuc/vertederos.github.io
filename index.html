@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Incendios Activos y Vertederos</title>
+
+  <!-- Leaflet Core -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Marker Cluster -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.Default.css" />
+  <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
+
+  <!-- SubGroup Plugin -->
+  <script src="https://unpkg.com/leaflet.featuregroup.subgroup@1.0.2/dist/leaflet.featuregroup.subgroup.js"></script>
+
+  <!-- Grouped Layer Control -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-groupedlayercontrol@0.6.1/dist/leaflet.groupedlayercontrol.min.css" />
+  <script src="https://unpkg.com/leaflet-groupedlayercontrol@0.6.1/dist/leaflet.groupedlayercontrol.min.js"></script>
+
+  <!-- Turf.js -->
+  <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+    #map {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      right: 320px;
+      left: 0;
+    }
+    #infoPanel {
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 300px;
+      height: 100%;
+      overflow-y: auto;
+      background: #f7f9fc;
+      border-left: 2px solid #1978cf;
+      padding: 15px;
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+      box-shadow: -2px 0 5px rgba(0,0,0,0.1);
+    }
+    #infoPanel h2 {
+      text-align: center;
+      font-size: 18px;
+      color: #1978cf;
+      margin-top: 10px;
+      margin-bottom: 10px;
+    }
+    #contador {
+      text-align: center;
+      font-size: 16px;
+      margin-bottom: 15px;
+      color: #333;
+    }
+    #vertederosQuemados {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    #vertederosQuemados li {
+      background: #fff;
+      margin-bottom: 10px;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      font-size: 13px;
+      cursor: pointer;
+      transition: background-color 0.3s;
+    }
+    #vertederosQuemados li:hover {
+      background-color: #e6f0ff;
+    }
+    .incendio-icon {
+      font-size: 18px;
+      margin-right: 5px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="infoPanel">
+  <h2>Vertederos con Incendios</h2>
+  <div id="contador">Total: 0</div>
+  <ul id="vertederosQuemados"></ul>
+</div>
+
+<script>
+// Crear mapa
+var map = L.map('map', {
+  center: [15.681225, -90.388175],
+  zoom: 8,
+  minZoom: 5
+});
+
+// Mapas base
+var baseOSM = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' });
+var baseGoogle = L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', { attribution: 'Google Hybrid' }).addTo(map);
+var gglmps = L.tileLayer('http://www.google.cn/maps/vt?lyrs=s@189&gl=cn&x={x}&y={y}&z={z}', { attribution: 'Google Satélite' });
+
+// Clusters
+var clusterGroup = L.markerClusterGroup();
+var subActivos = L.featureGroup.subGroup(clusterGroup);
+var subVertederos = L.featureGroup.subGroup(clusterGroup);
+map.addLayer(clusterGroup);
+
+// Iconos
+var iconoActivo = L.icon({
+  iconUrl: 'https://images.emojiterra.com/google/noto-emoji/animated-emoji/1f525.gif',
+  iconSize: [35, 35],
+  iconAnchor: [17, 35]
+});
+
+// Variables globales
+var buffersVertederos = [];
+var vertederosIncendiados = [];
+var buffersParpadeo = [];
+var marcadoresIncendios = [];
+
+// Función para formatear fecha
+function formatEpochDate(epoch) {
+  if (!epoch || isNaN(epoch)) return 'N/D';
+  var d = new Date(epoch);
+  return d.toLocaleString('es-ES', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit'
+  });
+}
+
+// Función para hacer parpadear buffers
+function iniciarParpadeo() {
+  setInterval(() => {
+    buffersParpadeo.forEach(layer => {
+      var currentOpacity = layer.options.fillOpacity;
+      var newOpacity = currentOpacity === 0.6 ? 0.1 : 0.6;
+      layer.setStyle({ fillOpacity: newOpacity });
+    });
+  }, 600);
+}
+
+// Actualizar panel listado
+function actualizarListado() {
+  var lista = document.getElementById('vertederosQuemados');
+  var contador = document.getElementById('contador');
+  lista.innerHTML = '';
+  contador.innerText = `Total: ${vertederosIncendiados.length}`;
+
+  vertederosIncendiados.forEach(item => {
+    var li = document.createElement('li');
+    li.innerHTML = `
+      <span class="incendio-icon">🔥</span>
+      <b>Municipio:</b> ${item.municipio}<br>
+      <b>Departamento:</b> ${item.departamento}<br>
+      <b>Fecha y hora:</b> ${item.fecha}
+    `;
+    li.addEventListener('click', function() {
+      map.flyTo([item.centro[1], item.centro[0]], 18);
+      let minDist = Infinity;
+      let closestMarker = null;
+      marcadoresIncendios.forEach(m => {
+        let dist = map.distance([item.centro[1], item.centro[0]], m.getLatLng());
+        if (dist < minDist) {
+          minDist = dist;
+          closestMarker = m;
+        }
+      });
+      if (closestMarker) {
+        setTimeout(() => {
+          closestMarker.openPopup();
+        }, 1000);
+      }
+    });
+    lista.appendChild(li);
+  });
+}
+
+// Cargar vertederos
+async function cargarVertederos() {
+  const r = await fetch('https://raw.githubusercontent.com/ncaalsuc/marn/refs/heads/main/Vertederos.geojson');
+  const data = await r.json();
+
+  data.features.forEach(f => {
+    var coords = f.geometry.coordinates;
+    var punto = turf.point([coords[0], coords[1]]);
+    var buffer = turf.buffer(punto, 4, { units: 'kilometers' });
+
+    var layer = L.geoJSON(buffer, {
+      style: { color: 'green', fillColor: 'green', weight: 2, fillOpacity: 0.3 }
+    }).bindPopup(
+      `<b>Municipio:</b> ${f.properties.Municipio || 'N/D'}<br><b>Departamento:</b> ${f.properties.Departamen || 'N/D'}`
+    );
+
+    buffersVertederos.push({
+      buffer: buffer,
+      municipio: f.properties.Municipio || 'N/D',
+      departamento: f.properties.Departamen || 'N/D',
+      centro: coords,
+      layer: layer
+    });
+
+    subVertederos.addLayer(layer);
+  });
+
+  subVertederos.addTo(map);
+}
+
+// Cargar incendios
+async function fetchAllINABData(offset = 0, limit = 1000, collected = []) {
+  var url = `https://sig.inab.gob.gt/server/rest/services/Hosted/service_4367e78a590145fc8c196887d919440b/FeatureServer/1/query?where=1=1&outFields=*&outSR=4326&f=geojson&resultOffset=${offset}&resultRecordCount=${limit}`;
+  var r = await fetch(url);
+  var json = await r.json();
+  if (json.features) {
+    collected.push(...json.features);
+    if (json.features.length === limit) {
+      return fetchAllINABData(offset + limit, limit, collected);
+    }
+  }
+  return collected;
+}
+
+async function cargarIncendios() {
+  var now = Date.now();
+  var hace8dias = now - 8 * 24 * 60 * 60 * 1000;
+  var datos = await fetchAllINABData();
+
+  datos.forEach(f => {
+    var p = f.properties;
+    var coords = f.geometry.coordinates;
+    var esActivo = !p.incendio_extinguido || isNaN(p.incendio_extinguido);
+    var esReciente = p.fecha_hora_incendio_i >= hace8dias;
+    if (!esReciente || !esActivo) return;
+
+    var incendioPoint = turf.point([coords[0], coords[1]]);
+    let quemandoVertedero = false;
+    let fechaIncendio = formatEpochDate(p.fecha_hora_incendio_i);
+
+    buffersVertederos.forEach(b => {
+      if (turf.booleanPointInPolygon(incendioPoint, b.buffer)) {
+        quemandoVertedero = true;
+        if (!vertederosIncendiados.some(v => v.municipio === b.municipio && v.departamento === b.departamento)) {
+          vertederosIncendiados.push({
+            municipio: b.municipio,
+            departamento: b.departamento,
+            centro: b.centro,
+            fecha: fechaIncendio
+          });
+          b.layer.setStyle({ color: 'red', fillColor: 'red' });
+          buffersParpadeo.push(b.layer);
+        }
+      }
+    });
+
+    var popup = `
+      <b>¿Es incendio forestal?:</b> ${p.es_incendio_forestal || 'N/D'}<br>
+      <b>Área total (ha):</b> ${p.area_total || 'N/D'}<br>
+      <b>Fecha:</b> ${fechaIncendio}<br>
+      <b>Lugar:</b> ${p.aldea_lugar_i || 'N/D'}<br>
+      <b>Causas:</b> ${p.causas_del_incendio || 'N/D'}
+    `;
+
+    var marker = L.marker([coords[1], coords[0]], { icon: iconoActivo }).bindPopup(
+      quemandoVertedero ? popup + `<br><b style="color:red;">🔥 ¡QUEMANDO VERTEDERO!</b>` : popup
+    );
+
+    marcadoresIncendios.push(marker);
+    subActivos.addLayer(marker);
+  });
+
+  subActivos.addTo(map);
+  actualizarListado();
+  iniciarParpadeo();
+}
+
+// Ejecutar
+cargarVertederos().then(cargarIncendios);
+
+// Control de capas
+var baseMaps = {
+  "<big>🌐 OpenStreetMap</big>": baseOSM,
+  "<big>🌍 Google Hybrid</big>": baseGoogle,
+  "<big>🗺️ Google Satélite</big>": gglmps
+};
+
+var groupedOverlays = {
+  "<big>🔥 Incendios Activos</big>": { "<big>🟠 Activos</big>": subActivos },
+  "<big>♻️ Vertederos </big>": { "<big>🟩 Zona de influencia</big>": subVertederos }
+};
+
+L.control.groupedLayers(baseMaps, groupedOverlays, {
+  collapsed: false,
+  groupCheckboxes: false
+}).addTo(map);
+
+</script>
+
+</body>
+</html>
